@@ -40,9 +40,17 @@ Figma → 번역 검수 → Lokalise 키 생성 플로우를 자동화한다.
 단어장 위치: ~/.claude/skills/auto-translation/domain-glossary.md
 ```
 
+**사용자 수정 기준 로드:**
+`user-corrections.md`를 함께 로드한다. `domain-glossary.md`와 충돌 시 이 파일이 우선한다.
+
+```
+수정 기준 위치: ~/.claude/skills/auto-translation/user-corrections.md
+```
+
 단어장에 있는 용어가 텍스트에 포함되면 번역 제안 시 자동 반영하고, 검수 화면에 표시한다:
 ```
 단어장 매칭: 송금 → Pay-out ✓
+사용자 수정: 수취인 → Receiver ✓
 ```
 
 ```
@@ -56,9 +64,10 @@ Figma → 번역 검수 → Lokalise 키 생성 플로우를 자동화한다.
 아래 환경 변수가 설정되어 있는지 확인한다.
 
 ```
-FIGMA_TOKEN        - Figma Personal Access Token
-LOKALISE_TOKEN     - Lokalise API Token
-LOKALISE_PROJECT_ID - Lokalise 프로젝트 ID
+FIGMA_TOKEN          - Figma Personal Access Token
+LOKALISE_TOKEN       - Lokalise API Token
+LOKALISE_PROJECT_ID  - Lokalise 프로젝트 ID
+GOOGLE_SHEETS_WEBHOOK - Google Apps Script Web App URL (시트 기록용)
 ```
 
 누락된 환경 변수가 있으면 즉시 중단하고 설정 방법을 안내한다:
@@ -70,11 +79,16 @@ claude settings env set LOKALISE_PROJECT_ID=your_project_id
 
 ### 1단계: 입력 받기
 
-사용자에게 다음을 요청한다:
-1. Figma 파일 URL (예: https://www.figma.com/file/XXXXX/...)
-2. 추출할 프레임 또는 레이어 이름
+사용자에게 Figma URL을 요청한다. **여러 개를 한 번에 받을 수 있다.**
 
-URL에서 파일 키를 추출한다: URL의 `/file/` 다음 세그먼트가 file_key.
+```
+Figma URL을 입력해주세요. 여러 개면 줄바꿈으로 구분해서 주세요.
+```
+
+URL이 여러 개면 순서대로 처리하고, 시트 기록은 마지막에 일괄 처리한다.
+각 URL에서 file_key와 node-id를 추출한다:
+- `figma.com/design/:fileKey/...?node-id=:nodeId` 형식
+- node-id의 `-`는 `:`로 변환
 
 ### 2단계: Figma 텍스트 추출
 
@@ -335,7 +349,44 @@ curl -s -X POST \
   "https://api.lokalise.com/api2/projects/$LOKALISE_PROJECT_ID/glossary-terms"
 ```
 
-### 8단계: 완료 리포트
+### 8단계: Google Sheets 기록
+
+Lokalise 등록이 완료된 후, **신규 등록된 키만** Google Sheets에 기록한다.
+`GOOGLE_SHEETS_WEBHOOK` 환경 변수가 없으면 이 단계는 건너뛴다.
+
+기록 대상:
+- **신규 (New)**: 이번 세션에서 Lokalise에 새로 등록된 키만 기록 (재사용 키는 기록하지 않음)
+
+```bash
+python3 -c "
+import json, subprocess, os
+
+figma_url = '{figma_url}'
+date = '{date}'  # YYYY-MM-DD
+new_items = {new_items}    # [{key, ko, en}, ...]
+
+rows = []
+for item in new_items:
+    rows.append([figma_url, date, 'New', item['key'], item['ko'], item['en']])
+
+payload = json.dumps({'rows': rows}, ensure_ascii=False)
+# Google Apps Script returns 302 → must POST first, then GET the redirect URL
+r1 = subprocess.run(
+    ['curl', '-s', '-D', '-', '--max-redirs', '0', '-X', 'POST',
+     os.environ['GOOGLE_SHEETS_WEBHOOK'],
+     '-H', 'Content-Type: application/json', '-d', payload],
+    capture_output=True, text=True
+)
+location = next((l.split(':', 1)[1].strip() for l in r1.stdout.split('\n') if l.lower().startswith('location:')), None)
+if location:
+    r2 = subprocess.run(['curl', '-s', '-L', location], capture_output=True, text=True)
+    print(r2.stdout)
+else:
+    print('webhook 오류: redirect URL 없음')
+"
+```
+
+### 9단계: 완료 리포트
 
 ```
 ─────────────────────────────────────────────
@@ -349,6 +400,9 @@ curl -s -X POST \
 용어집 추가: 2개
   - 가상계좌 → VirtualAccount
   - 채널 → Channel
+
+📊 Google Sheets 기록 완료
+  - 신규: 6개
 ─────────────────────────────────────────────
 ```
 

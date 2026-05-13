@@ -1,0 +1,7 @@
+interface:
+  display_name: "Auto Translation"
+  short_description: "Figma to Lokalise translation workflow"
+  default_prompt: "Use $auto-translation to process Figma Korean UI text into reviewed Lokalise keys."
+
+policy:
+  allow_implicit_invocation: true

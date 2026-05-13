@@ -1,6 +1,6 @@
 # Auto Translation Skill
 
-Figma 화면의 한글 텍스트를 추출해 영문 번역 후 Lokalise에 자동 등록하는 Claude Code 스킬입니다.
+Figma 화면의 한글 텍스트를 추출해 영문 번역 후 Lokalise에 자동 등록하는 Codex 스킬입니다.
 
 ## 플로우
 
@@ -16,29 +16,43 @@ Figma 화면의 한글 텍스트를 추출해 영문 번역 후 Lokalise에 자�
 ### 1. 파일 복사
 
 ```bash
-cp -r auto-translation ~/.claude/skills/
+mkdir -p ~/.codex/skills
+cp -R auto-translation ~/.codex/skills/
 ```
 
 ### 2. 환경 변수 설정
 
 ```bash
-claude settings env set FIGMA_TOKEN=your_figma_personal_access_token
-claude settings env set LOKALISE_TOKEN=your_lokalise_api_token
-claude settings env set LOKALISE_PROJECT_ID=your_lokalise_project_id
+export FIGMA_TOKEN=your_figma_personal_access_token
+export LOKALISE_TOKEN=your_lokalise_api_token
+export LOKALISE_PROJECT_ID=your_lokalise_project_id
 ```
 
 - **FIGMA_TOKEN**: [Figma 계정 설정](https://www.figma.com/settings) → Personal access tokens에서 발급
 - **LOKALISE_TOKEN**: Lokalise → Account Settings → API tokens에서 발급
 - **LOKALISE_PROJECT_ID**: Lokalise 프로젝트 Settings → General에서 확인
 
+권장 저장 위치는 `~/.codex/secrets/lokalise.json`입니다.
+
+```json
+{
+  "FIGMA_TOKEN": "...",
+  "LOKALISE_TOKEN": "...",
+  "LOKALISE_PROJECT_ID": "...",
+  "GOOGLE_SHEETS_WEBHOOK": "..."
+}
+```
+
+Codex 실행 환경에 위 변수가 없더라도 스킬은 `~/.codex/secrets/lokalise.json`을 먼저 참고합니다. 이 파일이 없을 때만 마이그레이션 fallback으로 `~/.claude/settings.json`을 확인합니다. 토큰 값은 저장소에 커밋하지 않습니다.
+
 ### 3. 실행
 
-Claude Code에서 아래 중 하나로 트리거:
+Codex에서 아래 중 하나로 트리거:
 
 ```
+$auto-translation
 번역 자동화
 figma 번역
-auto_translation
 ```
 
 ## 포함 파일

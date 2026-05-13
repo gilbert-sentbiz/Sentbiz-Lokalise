@@ -1,10 +1,6 @@
 ---
 name: auto-translation
-description: Figma→Lokalise 번역 자동화. "번역 자동화", "figma 번역" 요청에 사용.
-triggers:
-  - "auto_translation"
-  - "번역 자동화"
-  - "figma 번역"
+description: Figma 화면의 한글 텍스트를 추출하고 도메인 용어집과 사용자 수정 기준으로 영문 번역을 검수한 뒤 Lokalise 키 생성과 Google Sheets 기록을 진행한다. Use when the user asks for "번역 자동화", "figma 번역", "$auto-translation", or Figma-to-Lokalise translation work.
 ---
 
 # Auto Translation Skill
@@ -34,27 +30,15 @@ Figma → 번역 검수 → Lokalise 키 생성 플로우를 자동화한다.
 스킬 디렉토리의 `skip-list.json`을 로드한다. 이 파일에 있는 텍스트는 검수 없이 자동 스킵된다.
 
 **도메인 단어장 로드:**
-`domain-glossary.md`를 참조해 번역 제안 시 우선 적용한다. Lokalise 용어집보다 높은 우선순위를 가진다.
-
-```
-단어장 위치: ~/.claude/skills/auto-translation/domain-glossary.md
-```
+스킬 디렉토리의 `domain-glossary.md`를 참조해 번역 제안 시 우선 적용한다. Lokalise 용어집보다 높은 우선순위를 가진다.
 
 **사용자 수정 기준 로드:**
-`user-corrections.md`를 함께 로드한다. `domain-glossary.md`와 충돌 시 이 파일이 우선한다.
-
-```
-수정 기준 위치: ~/.claude/skills/auto-translation/user-corrections.md
-```
+스킬 디렉토리의 `user-corrections.md`를 함께 로드한다. `domain-glossary.md`와 충돌 시 이 파일이 우선한다.
 
 단어장에 있는 용어가 텍스트에 포함되면 번역 제안 시 자동 반영하고, 검수 화면에 표시한다:
 ```
 단어장 매칭: 송금 → Pay-out ✓
 사용자 수정: 수취인 → Receiver ✓
-```
-
-```
-스킵 목록 위치: ~/.claude/skills/auto-translation/skip-list.json
 ```
 
 스킵 시 항목별로 이번만 스킵할지, 영구 스킵 목록에 추가할지 즉시 선택한다 (세션 종료 시 일괄 처리 방식 대신). 자세한 인터랙션은 5단계 참조.
@@ -70,11 +54,32 @@ LOKALISE_PROJECT_ID  - Lokalise 프로젝트 ID
 GOOGLE_SHEETS_WEBHOOK - Google Apps Script Web App URL (시트 기록용)
 ```
 
-누락된 환경 변수가 있으면 즉시 중단하고 설정 방법을 안내한다:
+인증 정보는 아래 순서로 확인한다.
+
+1. 프로젝트 루트의 `./.codex/lokalise.json`
+2. `~/.codex/secrets/lokalise.json`
+3. 현재 shell 환경 변수
+4. 마이그레이션 fallback: `~/.claude/settings.json`
+
+프로젝트 로컬 파일이 있으면 그 파일을 우선 사용한다. 토큰 값은 출력하거나 repo 파일에 저장하지 않는다.
+
+secret 파일 예시:
+```json
+{
+  "FIGMA_TOKEN": "...",
+  "LOKALISE_TOKEN": "...",
+  "LOKALISE_PROJECT_ID": "...",
+  "GOOGLE_SHEETS_WEBHOOK": "..."
+}
 ```
-claude settings env set FIGMA_TOKEN=your_token
-claude settings env set LOKALISE_TOKEN=your_token
-claude settings env set LOKALISE_PROJECT_ID=your_project_id
+
+프로젝트 로컬 파일은 별도 보관용이며, 이 저장소 안에 두되 커밋하지 않는다.
+
+모든 경로에서 누락된 필수 값이 있으면 즉시 중단하고 설정 방법을 안내한다:
+```
+export FIGMA_TOKEN=your_token
+export LOKALISE_TOKEN=your_token
+export LOKALISE_PROJECT_ID=your_project_id
 ```
 
 ### 1단계: 입력 받기
@@ -92,17 +97,30 @@ URL이 여러 개면 순서대로 처리하고, 시트 기록은 마지막에 �
 
 ### 2단계: Figma 텍스트 추출
 
-Figma API로 파일 전체 구조를 가져온 뒤, 입력받은 프레임/레이어 이름으로 노드를 찾는다.
+Figma URL에 `node-id`가 있으면 해당 노드만 Figma API로 가져온다. `node-id`가 없으면 사용자에게 프레임/레이어 이름을 요청한 뒤 파일 전체 구조에서 해당 노드를 찾는다.
+
+- `node-id`가 있는 경우: `FIGMA_API_URL="https://api.figma.com/v1/files/{file_key}/nodes?ids={node_id}"`
+- `node-id`가 없는 경우: `FIGMA_API_URL="https://api.figma.com/v1/files/{file_key}"`, `frame_name`은 사용자 입력값
 
 ```bash
 curl -H "X-Figma-Token: $FIGMA_TOKEN" \
-  "https://api.figma.com/v1/files/{file_key}" \
+  "$FIGMA_API_URL" \
   | python3 -c "
 import json, sys
 
 data = json.load(sys.stdin)
 
+def first_document_node(payload):
+    nodes = payload.get('nodes') or {}
+    for item in nodes.values():
+        doc = item.get('document')
+        if doc:
+            return doc
+    return payload.get('document')
+
 def find_frame(node, name):
+    if not node:
+        return None
     if node.get('name', '').lower() == name.lower():
         return node
     for child in node.get('children', []):
@@ -126,18 +144,20 @@ def extract_texts(node, results=None):
         extract_texts(child, results)
     return results
 
-canvas = data['document']
-frame = find_frame(canvas, '{frame_name}')
-if not frame:
+root = first_document_node(data)
+frame_name = '{frame_name}'
+target = root if not frame_name else find_frame(root, frame_name)
+
+if not target:
     print(json.dumps({'error': 'Frame not found'}))
 else:
-    texts = extract_texts(frame)
+    texts = extract_texts(target)
     print(json.dumps(texts, ensure_ascii=False))
 "
 ```
 
 추출 결과를 파싱해 텍스트 목록을 만든다. 중복 텍스트는 제거한다.
-프레임을 찾지 못하면 사용자에게 정확한 이름을 다시 요청한다.
+`node-id` 없이 프레임을 찾지 못하면 사용자에게 정확한 이름을 다시 요청한다.
 
 ### 3단계: Lokalise 데이터 로드 (용어집 + 기존 키)
 
@@ -145,13 +165,34 @@ else:
 
 #### 3-1. 기존 키 인덱스 구축
 
+Lokalise list API는 한 페이지에 최대 500개만 반환한다. `x-pagination-page-count` 응답 헤더를 확인해 모든 페이지를 읽는다. 한 페이지만 읽으면 기존 키 중복 감지가 누락될 수 있다.
+
 ```bash
-curl -s -H "x-api-token: $LOKALISE_TOKEN" \
-  "https://api.lokalise.com/api2/projects/$LOKALISE_PROJECT_ID/keys?limit=500&include_translations=1" \
-  | python3 -c "
-import json, sys
-data = json.load(sys.stdin)
-keys = data.get('keys', [])
+python3 -c "
+import json, os, urllib.parse, urllib.request
+
+token = os.environ['LOKALISE_TOKEN']
+project_id = os.environ['LOKALISE_PROJECT_ID']
+
+def fetch_page(page):
+    query = urllib.parse.urlencode({
+        'limit': 500,
+        'page': page,
+        'include_translations': 1,
+    })
+    url = f'https://api.lokalise.com/api2/projects/{project_id}/keys?{query}'
+    req = urllib.request.Request(url, headers={'x-api-token': token})
+    with urllib.request.urlopen(req) as res:
+        return json.load(res), int(res.headers.get('x-pagination-page-count', '1'))
+
+keys = []
+page = 1
+while True:
+    data, page_count = fetch_page(page)
+    keys.extend(data.get('keys', []))
+    if page >= page_count:
+        break
+    page += 1
 
 # 한글 번역 → {key_name, en_translation} 인덱스
 ko_to_existing = {}
@@ -177,13 +218,27 @@ print(json.dumps(ko_to_existing, ensure_ascii=False))
 양방향을 `한글 → 영문` 방향으로 통일해서 인덱싱한다.
 
 ```bash
-curl -s -H "x-api-token: $LOKALISE_TOKEN" \
-  "https://api.lokalise.com/api2/projects/$LOKALISE_PROJECT_ID/glossary-terms?limit=500" \
-  | python3 -c "
-import json, sys, unicodedata
+python3 -c "
+import json, os, unicodedata, urllib.parse, urllib.request
 
-data = json.load(sys.stdin)
-terms = data.get('data', data.get('glossary_terms', []))
+token = os.environ['LOKALISE_TOKEN']
+project_id = os.environ['LOKALISE_PROJECT_ID']
+
+def fetch_page(page):
+    query = urllib.parse.urlencode({'limit': 500, 'page': page})
+    url = f'https://api.lokalise.com/api2/projects/{project_id}/glossary-terms?{query}'
+    req = urllib.request.Request(url, headers={'x-api-token': token})
+    with urllib.request.urlopen(req) as res:
+        return json.load(res), int(res.headers.get('x-pagination-page-count', '1'))
+
+terms = []
+page = 1
+while True:
+    data, page_count = fetch_page(page)
+    terms.extend(data.get('data', data.get('glossary_terms', [])))
+    if page >= page_count:
+        break
+    page += 1
 
 def is_korean(text):
     return any('HANGUL' in unicodedata.name(c, '') for c in text if c.strip())
@@ -216,10 +271,57 @@ print(json.dumps(ko_to_en, ensure_ascii=False))
 4. **텍스트 유형 판별**: 문맥을 보고 common / msgPlaceholder / msgError / msgTooltip 등 구분
 5. **키 이름 제안**: 컨벤션에 맞는 Lokalise 키 이름 생성
 6. **영문 번역 제안**: 자연스럽고 일관된 영문 번역 생성
+7. **신규 키 원칙**: 기존 키가 없으면 `skip`이 아니라 새 키 제안을 기본값으로 둔다. `skip`은 skip-list에 명시된 값, 숫자/코드/패턴 문자열, 또는 사용자가 직접 스킵을 요청한 경우에만 사용한다.
 
 ### 5단계: 검수 루프 (항목별 인터랙션)
 
-각 텍스트를 순서대로 보여주며 사용자 검수를 받는다.
+검수는 먼저 `기존 키 후보` 표를 보여주고, 다음으로 `스킵 후보`, 마지막으로 `신규 키 후보` 표를 따로 보여준다. 사용자는 번호를 지정해 `번역 수정`, `키 수정`, `스킵`, `승인`을 요청할 수 있다.
+
+표는 마크다운 표보다 스크린샷처럼 정렬된 고정폭 텍스트 표를 우선 사용한다. 전체 표를 fenced code block 안에 넣고, 공백 패딩으로 열을 맞춘다. `키 제안` 열은 가능한 한 말줄임 없이 보여준다.
+
+권장 열:
+- `번호` 3칸
+- `국문` 20칸
+- `영문 번역 제안` 24칸
+- `키 제안` 48칸
+- `상태` 10칸
+- 필요 시 `판단 근거` 16칸
+
+첫 번째 표는 `기존 키 후보`만 포함한다.
+두 번째 표는 `스킵 후보`만 포함한다.
+세 번째 표는 `신규 키 후보`만 포함한다.
+두 표 모두 아래처럼 간결하게 유지한다:
+
+예시:
+
+기존 키:
+
+```text
+No  국문                 영문 번역 제안              키 제안                                           상태
+01  서비스 시작일자      Service Start Date         common_ServiceStartDate                           기존 키 후보
+02  조회                 Search                     common_SearchList                                 기존 키 후보
+```
+
+기존 키 후보의 `키 제안`은 반드시 Lokalise에 실제로 존재하는 키 이름이어야 한다. 유사 의미를 추론해 새 이름을 적지 않는다.
+
+스킵:
+
+```text
+No  국문                 영문 번역 제안              키 제안                                           상태
+11  플홀                 -                          skip                                              스킵 후보
+12  YYYY.MM.DD - ...     -                          skip                                              스킵 후보
+```
+
+신규 키:
+
+```text
+No  국문                 영문 번역 제안              키 제안                                           상태
+21  케이뱅크             K Bank                     common_KBank                                      신규 키 후보
+22  월렛거래번호         Wallet Transaction Number  common_WalletTransactionNumber                    신규 키 후보
+```
+
+표를 보여준 뒤, 사용자가 지정한 번호만 순서대로 세부 검수한다. 번호가 없으면 세부 검수로 진행하지 않는다.
+신규 후보는 항상 키 제안을 함께 보여준다. 키 제안은 기존 키 재사용이 아니라면 새 이름이어야 한다.
 
 **기존 키가 없는 경우 (신규):**
 ```

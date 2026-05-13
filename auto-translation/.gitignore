@@ -1,1 +1,4 @@
 session-state.json
+credentials.json
+.env
+.env.*
